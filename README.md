@@ -12,6 +12,7 @@ We have achieved most of the architectural goals and new features planned for v3
   - [x] Built-in identifier prefixing (aka "stripWith")
   - [x] Built-in pretty-printing
   - [x] Lean ~10kb brotli-compressed browser build after dropping source map and identifier prefixing
+  - [x] SFC compiler (replacement of `@vue/component-compiler-utils`)
 
 - Runtime
   - [x] Significantly faster
@@ -21,21 +22,11 @@ We have achieved most of the architectural goals and new features planned for v3
   - [x] Portals
   - [x] Suspense w/ `async setup()`
 
-However, there are still some 2.x parity features not completed yet:
+## Major TODOs:
 
 - [ ] Server-side rendering
-- [ ] `<keep-alive>`
-- [ ] `<transition>`
-- [ ] Compiler DOM-specific transforms
-  - [ ] `v-on` DOM modifiers
-  - [ ] `v-model`
-  - [ ] `v-text`
-  - [ ] `v-pre`
-  - [ ] `v-once`
-  - [ ] `v-html`
-  - [ ] `v-show`
 
-The current implementation also requires native ES2015+ in the runtime environment and does not support IE11 (yet).
+Also note that the current implementation requires native ES2015+ in the runtime environment and does not support IE11 (yet).
 
 ## Contribution
 

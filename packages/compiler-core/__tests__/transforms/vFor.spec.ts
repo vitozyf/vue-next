@@ -1,4 +1,4 @@
-import { parse } from '../../src/parse'
+import { baseParse as parse } from '../../src/parse'
 import { transform } from '../../src/transform'
 import { transformIf } from '../../src/transforms/vIf'
 import { transformFor } from '../../src/transforms/vFor'
@@ -22,9 +22,10 @@ import {
   CREATE_BLOCK,
   FRAGMENT,
   RENDER_LIST,
-  RENDER_SLOT
+  RENDER_SLOT,
+  WITH_DIRECTIVES
 } from '../../src/runtimeHelpers'
-import { PatchFlags } from '@vue/runtime-dom'
+import { PatchFlags } from '@vue/shared'
 import { createObjectMatcher, genFlagText } from '../testUtils'
 
 function parseWithForTransform(
@@ -218,7 +219,7 @@ describe('compiler: v-for', () => {
       expect(onError).toHaveBeenCalledTimes(1)
       expect(onError).toHaveBeenCalledWith(
         expect.objectContaining({
-          code: ErrorCodes.X_FOR_NO_EXPRESSION
+          code: ErrorCodes.X_V_FOR_NO_EXPRESSION
         })
       )
     })
@@ -230,7 +231,7 @@ describe('compiler: v-for', () => {
       expect(onError).toHaveBeenCalledTimes(1)
       expect(onError).toHaveBeenCalledWith(
         expect.objectContaining({
-          code: ErrorCodes.X_FOR_MALFORMED_EXPRESSION
+          code: ErrorCodes.X_V_FOR_MALFORMED_EXPRESSION
         })
       )
     })
@@ -242,7 +243,7 @@ describe('compiler: v-for', () => {
       expect(onError).toHaveBeenCalledTimes(1)
       expect(onError).toHaveBeenCalledWith(
         expect.objectContaining({
-          code: ErrorCodes.X_FOR_MALFORMED_EXPRESSION
+          code: ErrorCodes.X_V_FOR_MALFORMED_EXPRESSION
         })
       )
     })
@@ -254,7 +255,7 @@ describe('compiler: v-for', () => {
       expect(onError).toHaveBeenCalledTimes(1)
       expect(onError).toHaveBeenCalledWith(
         expect.objectContaining({
-          code: ErrorCodes.X_FOR_MALFORMED_EXPRESSION
+          code: ErrorCodes.X_V_FOR_MALFORMED_EXPRESSION
         })
       )
     })
@@ -266,7 +267,7 @@ describe('compiler: v-for', () => {
       expect(onError).toHaveBeenCalledTimes(1)
       expect(onError).toHaveBeenCalledWith(
         expect.objectContaining({
-          code: ErrorCodes.X_FOR_MALFORMED_EXPRESSION
+          code: ErrorCodes.X_V_FOR_MALFORMED_EXPRESSION
         })
       )
     })
@@ -703,7 +704,8 @@ describe('compiler: v-for', () => {
           [
             { type: NodeTypes.TEXT, content: `hello` },
             { type: NodeTypes.ELEMENT, tag: `span` }
-          ]
+          ],
+          genFlagText(PatchFlags.STABLE_FRAGMENT)
         ]
       })
       expect(generate(root).code).toMatchSnapshot()
@@ -783,7 +785,8 @@ describe('compiler: v-for', () => {
           [
             { type: NodeTypes.TEXT, content: `hello` },
             { type: NodeTypes.ELEMENT, tag: `span` }
-          ]
+          ],
+          genFlagText(PatchFlags.STABLE_FRAGMENT)
         ]
       })
       expect(generate(root).code).toMatchSnapshot()
@@ -840,6 +843,29 @@ describe('compiler: v-for', () => {
                 genFlagText(PatchFlags.UNKEYED_FRAGMENT)
               ]
             }
+          }
+        ]
+      })
+      expect(generate(root).code).toMatchSnapshot()
+    })
+
+    test('v-for on element with custom directive', () => {
+      const {
+        root,
+        node: { codegenNode }
+      } = parseWithForTransform('<div v-for="i in list" v-foo/>')
+      const { returns } = assertSharedCodegen(codegenNode, false, true)
+      expect(returns).toMatchObject({
+        type: NodeTypes.JS_SEQUENCE_EXPRESSION,
+        expressions: [
+          { callee: OPEN_BLOCK },
+          // should wrap withDirectives() around createBlock()
+          {
+            callee: WITH_DIRECTIVES,
+            arguments: [
+              { callee: CREATE_BLOCK },
+              { type: NodeTypes.JS_ARRAY_EXPRESSION }
+            ]
           }
         ]
       })

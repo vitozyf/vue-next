@@ -1,3 +1,4 @@
+import { CodegenOptions } from './options'
 import {
   RootNode,
   TemplateChildNode,
@@ -9,14 +10,15 @@ import {
   CallExpression,
   ArrayExpression,
   ObjectExpression,
-  SourceLocation,
   Position,
   InterpolationNode,
   CompoundExpressionNode,
   SimpleExpressionNode,
   FunctionExpression,
   SequenceExpression,
-  ConditionalExpression
+  ConditionalExpression,
+  CacheExpression,
+  locStub
 } from './ast'
 import { SourceMapGenerator, RawSourceMap } from 'source-map'
 import {
@@ -28,37 +30,21 @@ import {
 } from './utils'
 import { isString, isArray, isSymbol } from '@vue/shared'
 import {
+  helperNameMap,
   TO_STRING,
   CREATE_VNODE,
-  COMMENT,
-  helperNameMap,
   RESOLVE_COMPONENT,
   RESOLVE_DIRECTIVE,
-  RuntimeHelper
+  SET_BLOCK_TRACKING,
+  CREATE_COMMENT,
+  CREATE_TEXT,
+  PUSH_SCOPE_ID,
+  POP_SCOPE_ID,
+  WITH_SCOPE_ID
 } from './runtimeHelpers'
+import { ImportItem } from './transform'
 
 type CodegenNode = TemplateChildNode | JSChildNode
-
-export interface CodegenOptions {
-  // - Module mode will generate ES module import statements for helpers
-  //   and export the render function as the default export.
-  // - Function mode will generate a single `const { helpers... } = Vue`
-  //   statement and return the render function. It is meant to be used with
-  //   `new Function(code)()` to generate a render function at runtime.
-  // Default: 'function'
-  mode?: 'module' | 'function'
-  // Prefix suitable identifiers with _ctx.
-  // If this option is false, the generated code will be wrapped in a
-  // `with (this) { ... }` block.
-  // Default: false
-  prefixIdentifiers?: boolean
-  // Generate source map?
-  // Default: false
-  sourceMap?: boolean
-  // Filename for source map generation.
-  // Default: `template.vue.html`
-  filename?: string
-}
 
 export interface CodegenResult {
   code: string
@@ -74,9 +60,8 @@ export interface CodegenContext extends Required<CodegenOptions> {
   offset: number
   indentLevel: number
   map?: SourceMapGenerator
-  helper(key: RuntimeHelper): string
-  push(code: string, node?: CodegenNode, openOnly?: boolean): void
-  resetMapping(loc: SourceLocation): void
+  helper(key: symbol): string
+  push(code: string, node?: CodegenNode): void
   indent(): void
   deindent(withoutNewLine?: boolean): void
   newline(): void
@@ -88,7 +73,8 @@ function createCodegenContext(
     mode = 'function',
     prefixIdentifiers = mode === 'module',
     sourceMap = false,
-    filename = `template.vue.html`
+    filename = `template.vue.html`,
+    scopeId = null
   }: CodegenOptions
 ): CodegenContext {
   const context: CodegenContext = {
@@ -96,24 +82,19 @@ function createCodegenContext(
     prefixIdentifiers,
     sourceMap,
     filename,
+    scopeId,
     source: ast.loc.source,
     code: ``,
     column: 1,
     line: 1,
     offset: 0,
     indentLevel: 0,
-
-    // lazy require source-map implementation, only in non-browser builds!
-    map:
-      __BROWSER__ || !sourceMap
-        ? undefined
-        : new (loadDep('source-map')).SourceMapGenerator(),
-
+    map: undefined,
     helper(key) {
       const name = helperNameMap[key]
       return prefixIdentifiers ? name : `_${name}`
     },
-    push(code, node, openOnly) {
+    push(code, node) {
       context.code += code
       if (!__BROWSER__ && context.map) {
         if (node) {
@@ -127,14 +108,9 @@ function createCodegenContext(
           addMapping(node.loc.start, name)
         }
         advancePositionWithMutation(context, code)
-        if (node && !openOnly) {
+        if (node && node.loc !== locStub) {
           addMapping(node.loc.end)
         }
-      }
-    },
-    resetMapping(loc: SourceLocation) {
-      if (!__BROWSER__ && context.map) {
-        addMapping(loc.start)
       }
     },
     indent() {
@@ -171,9 +147,12 @@ function createCodegenContext(
     })
   }
 
-  if (!__BROWSER__ && context.map) {
-    context.map.setSourceContent(filename, context.source)
+  if (!__BROWSER__ && sourceMap) {
+    // lazy require source-map implementation, only in non-browser builds
+    context.map = new (loadDep('source-map')).SourceMapGenerator()
+    context.map!.setSourceContent(filename, context.source)
   }
+
   return context
 }
 
@@ -189,10 +168,12 @@ export function generate(
     prefixIdentifiers,
     indent,
     deindent,
-    newline
+    newline,
+    scopeId
   } = context
   const hasHelpers = ast.helpers.length > 0
   const useWithBlock = !prefixIdentifiers && mode !== 'module'
+  const genScopeId = !__BROWSER__ && scopeId != null && mode === 'module'
 
   // preambles
   if (mode === 'function') {
@@ -211,24 +192,45 @@ export function generate(
         // has check cost, but hoists are lifted out of the function - we need
         // to provide the helper here.
         if (ast.hoists.length) {
-          push(`const _${helperNameMap[CREATE_VNODE]} = Vue.createVNode\n`)
+          const staticHelpers = [CREATE_VNODE, CREATE_COMMENT, CREATE_TEXT]
+            .filter(helper => ast.helpers.includes(helper))
+            .map(s => `${helperNameMap[s]}: _${helperNameMap[s]}`)
+            .join(', ')
+          push(`const { ${staticHelpers} } = Vue\n`)
         }
       }
     }
     genHoists(ast.hoists, context)
-    context.newline()
+    newline()
     push(`return `)
   } else {
     // generate import statements for helpers
+    if (genScopeId) {
+      ast.helpers.push(WITH_SCOPE_ID)
+      if (ast.hoists.length) {
+        ast.helpers.push(PUSH_SCOPE_ID, POP_SCOPE_ID)
+      }
+    }
     if (hasHelpers) {
       push(`import { ${ast.helpers.map(helper).join(', ')} } from "vue"\n`)
     }
+    if (ast.imports.length) {
+      genImports(ast.imports, context)
+      newline()
+    }
+    if (genScopeId) {
+      push(`const withId = ${helper(WITH_SCOPE_ID)}("${scopeId}")`)
+      newline()
+    }
     genHoists(ast.hoists, context)
-    context.newline()
-    push(`export default `)
+    newline()
+    push(`export `)
   }
 
   // enter render function
+  if (genScopeId) {
+    push(`const render = withId(`)
+  }
   push(`function render() {`)
   indent()
 
@@ -244,10 +246,18 @@ export function generate(
           .join(', ')} } = _Vue`
       )
       newline()
+      if (ast.cached > 0) {
+        push(`const _cache = $cache`)
+        newline()
+      }
       newline()
     }
   } else {
     push(`const _ctx = this`)
+    if (ast.cached > 0) {
+      newline()
+      push(`const _cache = _ctx.$cache`)
+    }
     newline()
   }
 
@@ -277,10 +287,16 @@ export function generate(
 
   deindent()
   push(`}`)
+
+  if (genScopeId) {
+    push(`)`)
+  }
+
   return {
     ast,
     code: context.code,
-    map: context.map ? context.map.toJSON() : undefined
+    // SourceMapGenerator does have toJSON() method but it's not in the types
+    map: context.map ? (context.map as any).toJSON() : undefined
   }
 }
 
@@ -305,10 +321,37 @@ function genHoists(hoists: JSChildNode[], context: CodegenContext) {
   if (!hoists.length) {
     return
   }
-  context.newline()
+  const { push, newline, helper, scopeId, mode } = context
+  const genScopeId = !__BROWSER__ && scopeId != null && mode === 'module'
+  newline()
+
+  // push scope Id before initilaizing hoisted vnodes so that these vnodes
+  // get the proper scopeId as well.
+  if (genScopeId) {
+    push(`${helper(PUSH_SCOPE_ID)}("${scopeId}")`)
+    newline()
+  }
+
   hoists.forEach((exp, i) => {
-    context.push(`const _hoisted_${i + 1} = `)
+    push(`const _hoisted_${i + 1} = `)
     genNode(exp, context)
+    newline()
+  })
+
+  if (genScopeId) {
+    push(`${helper(POP_SCOPE_ID)}()`)
+    newline()
+  }
+}
+
+function genImports(importsOptions: ImportItem[], context: CodegenContext) {
+  if (!importsOptions.length) {
+    return
+  }
+  importsOptions.forEach(imports => {
+    context.push(`import `)
+    genNode(imports.exp, context)
+    context.push(` from '${imports.path}'`)
     context.newline()
   })
 }
@@ -338,7 +381,7 @@ function genNodeListAsArray(
 }
 
 function genNodeList(
-  nodes: (string | RuntimeHelper | CodegenNode | TemplateChildNode[])[],
+  nodes: (string | symbol | CodegenNode | TemplateChildNode[])[],
   context: CodegenContext,
   multilines: boolean = false
 ) {
@@ -363,10 +406,7 @@ function genNodeList(
   }
 }
 
-function genNode(
-  node: CodegenNode | RuntimeHelper | string,
-  context: CodegenContext
-) {
+function genNode(node: CodegenNode | symbol | string, context: CodegenContext) {
   if (isString(node)) {
     context.push(node)
     return
@@ -396,6 +436,9 @@ function genNode(
     case NodeTypes.INTERPOLATION:
       genInterpolation(node, context)
       break
+    case NodeTypes.TEXT_CALL:
+      genNode(node.codegenNode, context)
+      break
     case NodeTypes.COMPOUND_EXPRESSION:
       genCompoundExpression(node, context)
       break
@@ -419,6 +462,9 @@ function genNode(
       break
     case NodeTypes.JS_CONDITIONAL_EXPRESSION:
       genConditionalExpression(node, context)
+      break
+    case NodeTypes.JS_CACHE_EXPRESSION:
+      genCacheExpression(node, context)
       break
     /* istanbul ignore next */
     default:
@@ -487,12 +533,7 @@ function genExpressionAsPropertyKey(
 function genComment(node: CommentNode, context: CodegenContext) {
   if (__DEV__) {
     const { push, helper } = context
-    push(
-      `${helper(CREATE_VNODE)}(${helper(COMMENT)}, 0, ${JSON.stringify(
-        node.content
-      )})`,
-      node
-    )
+    push(`${helper(CREATE_COMMENT)}(${JSON.stringify(node.content)})`, node)
   }
 }
 
@@ -501,13 +542,13 @@ function genCallExpression(node: CallExpression, context: CodegenContext) {
   const callee = isString(node.callee)
     ? node.callee
     : context.helper(node.callee)
-  context.push(callee + `(`, node, true)
+  context.push(callee + `(`, node)
   genNodeList(node.arguments, context)
   context.push(`)`)
 }
 
 function genObjectExpression(node: ObjectExpression, context: CodegenContext) {
-  const { push, indent, deindent, newline, resetMapping } = context
+  const { push, indent, deindent, newline } = context
   const { properties } = node
   if (!properties.length) {
     push(`{}`, node)
@@ -520,8 +561,7 @@ function genObjectExpression(node: ObjectExpression, context: CodegenContext) {
   push(multilines ? `{` : `{ `)
   multilines && indent()
   for (let i = 0; i < properties.length; i++) {
-    const { key, value, loc } = properties[i]
-    resetMapping(loc) // reset source mapping for every property.
+    const { key, value } = properties[i]
     // key
     genExpressionAsPropertyKey(key, context)
     push(`: `)
@@ -534,8 +574,7 @@ function genObjectExpression(node: ObjectExpression, context: CodegenContext) {
     }
   }
   multilines && deindent()
-  const lastChar = context.code[context.code.length - 1]
-  push(multilines || /[\])}]/.test(lastChar) ? `}` : ` }`)
+  push(multilines ? `}` : ` }`)
 }
 
 function genArrayExpression(node: ArrayExpression, context: CodegenContext) {
@@ -546,8 +585,15 @@ function genFunctionExpression(
   node: FunctionExpression,
   context: CodegenContext
 ) {
-  const { push, indent, deindent } = context
-  const { params, returns, newline } = node
+  const { push, indent, deindent, scopeId, mode } = context
+  const { params, returns, newline, isSlot } = node
+  // slot functions also need to push scopeId before rendering its content
+  const genScopeId =
+    !__BROWSER__ && isSlot && scopeId != null && mode === 'module'
+
+  if (genScopeId) {
+    push(`withId(`)
+  }
   push(`(`, node)
   if (isArray(params)) {
     genNodeList(params, context)
@@ -568,6 +614,9 @@ function genFunctionExpression(
   if (newline) {
     deindent()
     push(`}`)
+  }
+  if (genScopeId) {
+    push(`)`)
   }
 }
 
@@ -612,4 +661,25 @@ function genSequenceExpression(
   context.push(`(`)
   genNodeList(node.expressions, context)
   context.push(`)`)
+}
+
+function genCacheExpression(node: CacheExpression, context: CodegenContext) {
+  const { push, helper, indent, deindent, newline } = context
+  push(`_cache[${node.index}] || (`)
+  if (node.isVNode) {
+    indent()
+    push(`${helper(SET_BLOCK_TRACKING)}(-1),`)
+    newline()
+  }
+  push(`_cache[${node.index}] = `)
+  genNode(node.value, context)
+  if (node.isVNode) {
+    push(`,`)
+    newline()
+    push(`${helper(SET_BLOCK_TRACKING)}(1),`)
+    newline()
+    push(`_cache[${node.index}]`)
+    deindent()
+  }
+  push(`)`)
 }

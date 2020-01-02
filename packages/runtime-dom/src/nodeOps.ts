@@ -32,10 +32,15 @@ export const nodeOps = {
     el.textContent = text
   },
 
-  parentNode: (node: Node): Node | null => node.parentNode,
+  parentNode: (node: Node): HTMLElement | null =>
+    node.parentNode as HTMLElement,
 
   nextSibling: (node: Node): Node | null => node.nextSibling,
 
   querySelector: (selector: string): Element | null =>
-    doc.querySelector(selector)
+    doc.querySelector(selector),
+
+  setScopeId(el: Element, id: string) {
+    el.setAttribute(id, '')
+  }
 }
